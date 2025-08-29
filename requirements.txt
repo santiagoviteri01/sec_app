@@ -1,0 +1,4 @@
+streamlit>=1.33
+passlib[bcrypt]>=1.7.4
+pyotp>=2.9.0
+qrcode[pil]>=7.4.2
