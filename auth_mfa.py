@@ -1,0 +1,255 @@
+# auth_mfa.py
+from __future__ import annotations
+import io
+import time
+import base64
+from dataclasses import dataclass
+from typing import Optional, Dict
+
+import streamlit as st
+import pyotp
+import qrcode
+from passlib.context import CryptContext
+
+# === Opcional (backend en Google Sheets) ===
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+except Exception:
+    gspread = None
+    Credentials = None
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+# ---------- Modelo ----------
+@dataclass
+class User:
+    username: str
+    display_name: str
+    role: str
+    password_hash: str
+    mfa_secret: Optional[str] = None
+    email: Optional[str] = None
+
+
+# ---------- UserStore base ----------
+class BaseUserStore:
+    def get_user(self, username: str) -> Optional[User]:
+        raise NotImplementedError
+
+    def update_user(self, username: str, **fields) -> None:
+        raise NotImplementedError
+
+
+# ---------- Backend 1: Google Sheets ----------
+class SheetUserStore(BaseUserStore):
+    """
+    Espera una hoja 'usuarios' (o la que indiques) con columnas:
+    username | display_name | role | password_hash | mfa_secret | email
+    """
+    def __init__(self, sheet_key: str, creds_dict: dict, worksheet_name: str = "usuarios"):
+        if gspread is None or Credentials is None:
+            raise RuntimeError("gspread y google.oauth2.service_account son requeridos para SheetUserStore.")
+        creds = Credentials.from_service_account_info(creds_dict, scopes=[
+            "https://www.googleapis.com/auth/spreadsheets"
+        ])
+        self.gc = gspread.authorize(creds)
+        self.sh = self.gc.open_by_key(sheet_key)
+        self.ws = self.sh.worksheet(worksheet_name)
+        self._header = [h.strip() for h in self.ws.row_values(1)]
+
+        # Índices por rendimiento
+        self._idx = {name: i for i, name in enumerate(self._header)}
+
+    def _row_to_user(self, row: list[str]) -> Optional[User]:
+        # Pad por seguridad
+        row = row + [""] * max(0, len(self._header) - len(row))
+        d = {h: row[i] if i < len(row) else "" for i, h in enumerate(self._header)}
+        if not d.get("username"):
+            return None
+        return User(
+            username=d.get("username", "").strip(),
+            display_name=d.get("display_name", "").strip() or d.get("username", ""),
+            role=d.get("role", "viewer").strip() or "viewer",
+            password_hash=d.get("password_hash", "").strip(),
+            mfa_secret=(d.get("mfa_secret") or "").strip() or None,
+            email=(d.get("email") or "").strip() or None,
+        )
+
+    @st.cache_data(ttl=60, show_spinner=False)
+    def _dump_all(self):
+        return self.ws.get_all_values()
+
+    def get_user(self, username: str) -> Optional[User]:
+        data = self._dump_all()
+        if not data or len(data) < 2:
+            return None
+        for i in range(1, len(data)):
+            row = data[i]
+            user = self._row_to_user(row)
+            if user and user.username == username:
+                return user
+        return None
+
+    def update_user(self, username: str, **fields) -> None:
+        # Encontrar fila del usuario
+        data = self.ws.get_all_values()
+        for i in range(1, len(data)):
+            row = data[i]
+            if len(row) <= self._idx["username"]:
+                continue
+            if row[self._idx["username"]].strip() == username:
+                # Actualizar campos
+                for k, v in fields.items():
+                    if k in self._idx:
+                        col = self._idx[k] + 1
+                        self.ws.update_cell(i + 1, col, v if v is not None else "")
+                st.cache_data.clear()  # invalidar cache local
+                return
+        # Si no existe y tiene mínimo requerido, crearlo
+        new_row = [""] * len(self._header)
+        for k, v in fields.items():
+            if k in self._idx:
+                new_row[self._idx[k]] = v if v is not None else ""
+        # username es obligatorio
+        if "username" in self._idx and fields.get("username"):
+            new_row[self._idx["username"]] = fields["username"]
+            self.ws.append_row(new_row)
+            st.cache_data.clear()
+
+
+# ---------- Backend 2: En memoria (útil para pruebas / migración) ----------
+class DictUserStore(BaseUserStore):
+    """
+    users_dict: { "user": {"password_hash": "...", "display_name": "...", "role": "...", "mfa_secret": "...", "email": "..."} }
+    """
+    def __init__(self, users_dict: Dict[str, Dict]):
+        self.users = users_dict
+
+    def get_user(self, username: str) -> Optional[User]:
+        d = self.users.get(username)
+        if not d:
+            return None
+        return User(
+            username=username,
+            display_name=d.get("display_name") or username,
+            role=d.get("role", "viewer"),
+            password_hash=d.get("password_hash", ""),
+            mfa_secret=d.get("mfa_secret"),
+            email=d.get("email"),
+        )
+
+    def update_user(self, username: str, **fields) -> None:
+        d = self.users.get(username, {})
+        d.update(fields)
+        self.users[username] = d
+
+
+# ---------- Utilidades de seguridad ----------
+def hash_password(plain: str) -> str:
+    return pwd_context.hash(plain)
+
+def verify_password(plain: str, hashed: str) -> bool:
+    if not hashed:
+        return False
+    try:
+        return pwd_context.verify(plain, hashed)
+    except Exception:
+        return False
+
+
+# ---------- Manager principal ----------
+class AuthManager:
+    def __init__(self, store: BaseUserStore, issuer_name: str = "InsurApp"):
+        self.store = store
+        self.issuer_name = issuer_name
+
+    # -- TOTP helpers --
+    def _ensure_mfa_secret(self, user: User) -> str:
+        if user.mfa_secret:
+            return user.mfa_secret
+        secret = pyotp.random_base32()
+        self.store.update_user(user.username, mfa_secret=secret)
+        user.mfa_secret = secret
+        return secret
+
+    def provisioning_uri(self, user: User) -> str:
+        secret = self._ensure_mfa_secret(user)
+        return pyotp.totp.TOTP(secret).provisioning_uri(
+            name=user.username,
+            issuer_name=self.issuer_name
+        )
+
+    def qr_png_base64(self, uri: str) -> str:
+        img = qrcode.make(uri)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode()
+
+    # -- Flujo UI en Streamlit --
+    def login(self, key_prefix: str = "auth") -> Optional[User]:
+        """
+        Retorna el User autenticado o None. Maneja:
+        1) Usuario/Contraseña (bcrypt)
+        2) MFA TOTP
+        Persiste en st.session_state[key_prefix + "_user"]
+        """
+        sess_user_key = f"{key_prefix}_user"
+        step_key = f"{key_prefix}_step"
+        u_key = f"{key_prefix}_username"
+        p_key = f"{key_prefix}_password"
+
+        if sess_user_key in st.session_state and st.session_state[sess_user_key]:
+            # Ya autenticado
+            return st.session_state[sess_user_key]
+
+        st.markdown("### Iniciar sesión")
+        username = st.text_input("Usuario", key=u_key)
+        password = st.text_input("Contraseña", type="password", key=p_key)
+
+        # Paso 1: credenciales
+        if st.button("Ingresar"):
+            user = self.store.get_user(username.strip()) if username else None
+            if not user or not verify_password(password, user.password_hash):
+                st.error("❌ Usuario o contraseña incorrectos.")
+                return None
+            # Guardamos usuario 'pendiente de MFA'
+            st.session_state[step_key] = "mfa"
+            st.session_state[sess_user_key] = None
+            st.session_state[f"{key_prefix}_pending_username"] = user.username
+            st.rerun()
+
+        # Paso 2: MFA
+        if st.session_state.get(step_key) == "mfa":
+            pending_username = st.session_state.get(f"{key_prefix}_pending_username")
+            user = self.store.get_user(pending_username) if pending_username else None
+            if not user:
+                st.error("Sesión inválida, vuelve a iniciar sesión.")
+                st.session_state.pop(step_key, None)
+                return None
+
+            # Mostrar QR si el usuario aún no está enrolado
+            secret = self._ensure_mfa_secret(user)
+            uri = self.provisioning_uri(user)
+            qr = self.qr_png_base64(uri)
+            with st.expander("Configurar MFA (solo si aún no lo hiciste)"):
+                st.markdown("Escanea este QR con Google Authenticator / Authy:")
+                st.image(f"data:image/png;base64,{qr}")
+                st.code(f"Clave secreta (backup): {secret}")
+
+            otp = st.text_input("Código de 6 dígitos (MFA)", max_chars=6)
+            if st.button("Verificar MFA"):
+                totp = pyotp.TOTP(secret)
+                if totp.verify(otp, valid_window=1):
+                    st.success("✅ Autenticación correcta.")
+                    st.session_state[sess_user_key] = user
+                    st.session_state.pop(step_key, None)
+                    # Limpieza de campos
+                    for k in (u_key, p_key, f"{key_prefix}_pending_username"):
+                        st.session_state.pop(k, None)
+                    time.sleep(0.3)
+                    st.rerun()
+                else:
+                    st.error("❌ Código MFA inválido.")
+        return None
