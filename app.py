@@ -1,46 +1,49 @@
 # app.py
 import os
 import streamlit as st
-from auth_mfa import AuthManager, DictUserStore, SheetUserStore, hash_password
+from auth_mfa import (
+    AuthManager, S3UserStore, SheetSeeder, hash_password  # <- NUEVOS
+)
 
-st.set_page_config(page_title="Demo Auth MFA", layout="centered")
+st.set_page_config(page_title="InsurApp Login", layout="centered")
 
+# --- Email (igual que ya tienes) ---
 def send_email_smtp(*, to: str, subject: str, html: str):
     import smtplib
     from email.message import EmailMessage
-
-    host = os.getenv("SMTP_HOST")
-    port = int(os.getenv("SMTP_PORT", "587"))
-    user = os.getenv("SMTP_USER")
-    pwd  = os.getenv("SMTP_PASS")
+    host = os.getenv("SMTP_HOST"); port = int(os.getenv("SMTP_PORT", "587"))
+    user = os.getenv("SMTP_USER"); pwd = os.getenv("SMTP_PASS")
     sender = os.getenv("SMTP_FROM", user)
 
     msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = sender
-    msg["To"] = to
+    msg["Subject"] = subject; msg["From"] = sender; msg["To"] = to
     msg.set_content("Para ver este mensaje usa un cliente compatible con HTML.")
     msg.add_alternative(html, subtype="html")
-
     with smtplib.SMTP(host, port) as s:
         s.starttls()
-        if user and pwd:
-            s.login(user, pwd)
+        if user and pwd: s.login(user, pwd)
         s.send_message(msg)
 
-@st.cache_resource
-def get_store():
-    return DictUserStore({
-        "demo": {
-            "display_name": "Usuario Demo",
-            "role": "admin",
-            "password_hash": hash_password("demo123"),
-            # "mfa_secret": None  # se autogenera y se persiste en session_state
-            "email": os.getenv("SMTP_TEST_TO", "demo@example.com"),  # <-- asegúrate de tener email
-        }
-    })
+# --- Seeder desde tu Google Sheet “de siempre” ---
+creds_dict = json.loads(Path("/etc/secrets/google-creds.json").read_text())
+seeder = SheetSeeder(
+    sheet_key="13hY8la9Xke5-wu3vmdB-tNKtY5D6ud4FZrJG2_HtKd8",   # <-- TU sheet
+    creds_dict=creds_dict,
+    worksheet_name="usuarios",                                   # o la que uses
+    email_col="CORREO ELECTRÓNICO",
+    cedula_col="CÉDULA",                                         # ajusta al nombre real
+    name_col="NOMBRE COMPLETO",
+    role_default="cliente"
+)
 
-store = get_store()
+# --- Store S3 (fuente de verdad) ---
+s3_store = S3UserStore(
+    bucket=os.getenv("AUTH_BUCKET_NAME"),      # p.ej. "insurapp-auth"
+    prefix=os.getenv("AUTH_PREFIX", "auth/users"),
+    aws_region=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
+    seeder=seeder
+)
+
 auth = AuthManager(store, issuer_name="InsurApp-Demo")
 
 # ---------- 1) Manejar link de reseteo ANTES del login ----------
