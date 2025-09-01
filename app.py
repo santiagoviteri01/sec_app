@@ -54,10 +54,12 @@ seeder = SheetSeeder(
 # 3) Store S3 (fuente de verdad de auth)
 # ======================================
 s3_store = S3UserStore(
-    bucket=st.secrets["aws"]["bucket_name"],                     # p. ej. "insurapp-uploader"
-    prefix="auth/users",                                         # ruta dentro del bucket
-    aws_region=st.secrets["aws"]["region"],                      # "us-east-1"
-    seeder=seeder
+    bucket=st.secrets["aws"]["bucket_name"],
+    prefix="auth/users",
+    aws_region=st.secrets["aws"]["region"],
+    aws_access_key_id=st.secrets["aws"]["access_key_id"],
+    aws_secret_access_key=st.secrets["aws"]["secret_access_key"],
+    seeder=seeder,
 )
 
 auth = AuthManager(s3_store, issuer_name="InsurApp")
