@@ -58,12 +58,9 @@ class SheetUserStore(BaseUserStore):
         self.sh = self.gc.open_by_key(sheet_key)
         self.ws = self.sh.worksheet(worksheet_name)
         self._header = [h.strip() for h in self.ws.row_values(1)]
-
-        # Índices por rendimiento
         self._idx = {name: i for i, name in enumerate(self._header)}
 
     def _row_to_user(self, row: list[str]) -> Optional[User]:
-        # Pad por seguridad
         row = row + [""] * max(0, len(self._header) - len(row))
         d = {h: row[i] if i < len(row) else "" for i, h in enumerate(self._header)}
         if not d.get("username"):
@@ -93,30 +90,27 @@ class SheetUserStore(BaseUserStore):
         return None
 
     def update_user(self, username: str, **fields) -> None:
-        # Encontrar fila del usuario
         data = self.ws.get_all_values()
         for i in range(1, len(data)):
             row = data[i]
             if len(row) <= self._idx["username"]:
                 continue
             if row[self._idx["username"]].strip() == username:
-                # Actualizar campos
                 for k, v in fields.items():
                     if k in self._idx:
                         col = self._idx[k] + 1
                         self.ws.update_cell(i + 1, col, v if v is not None else "")
-                st.cache_data.clear()  # invalidar cache local
+                st.cache_data.clear()
                 return
-        # Si no existe y tiene mínimo requerido, crearlo
+        # Crear si no existe
         new_row = [""] * len(self._header)
+        if "username" not in fields:
+            fields["username"] = username
         for k, v in fields.items():
             if k in self._idx:
                 new_row[self._idx[k]] = v if v is not None else ""
-        # username es obligatorio
-        if "username" in self._idx and fields.get("username"):
-            new_row[self._idx["username"]] = fields["username"]
-            self.ws.append_row(new_row)
-            st.cache_data.clear()
+        self.ws.append_row(new_row)
+        st.cache_data.clear()
 
 
 # ---------- Backend 2: En memoria (útil para pruebas / migración) ----------
@@ -167,10 +161,28 @@ class AuthManager:
 
     # -- TOTP helpers --
     def _ensure_mfa_secret(self, user: User) -> str:
+        """
+        Parche para demos: si usas DictUserStore, persistimos en session_state para que
+        el secreto no cambie en cada rerun de Streamlit.
+        """
+        ss_key = f"mfa_secret_{user.username}"
+
+        if isinstance(self.store, DictUserStore):
+            # ¿Ya guardado en sesión?
+            if ss_key in st.session_state:
+                if not user.mfa_secret:
+                    self.store.update_user(user.username, mfa_secret=st.session_state[ss_key])
+                return st.session_state[ss_key]
+
         if user.mfa_secret:
+            if isinstance(self.store, DictUserStore):
+                st.session_state[ss_key] = user.mfa_secret
             return user.mfa_secret
+
         secret = pyotp.random_base32()
         self.store.update_user(user.username, mfa_secret=secret)
+        if isinstance(self.store, DictUserStore):
+            st.session_state[ss_key] = secret
         user.mfa_secret = secret
         return secret
 
@@ -187,12 +199,21 @@ class AuthManager:
         img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode()
 
+    def _render_debug_totp(self, secret: str) -> None:
+        with st.expander("Debug TOTP (solo desarrollo)"):
+            st.write("Este valor DEBE coincidir con tu app Authenticator (no lo dejes en producción).")
+            st.code(pyotp.TOTP(secret).now())
+            # Barra de tiempo aproximada al próximo tick
+            # (solo visual; TOTP estándar = 30s por paso)
+            epoch = int(time.time())
+            st.progress((epoch % 30) / 30)
+
     # -- Flujo UI en Streamlit --
-    def login(self, key_prefix: str = "auth") -> Optional[User]:
+    def login(self, key_prefix: str = "auth", debug: bool = False) -> Optional[User]:
         """
         Retorna el User autenticado o None. Maneja:
         1) Usuario/Contraseña (bcrypt)
-        2) MFA TOTP
+        2) MFA TOTP (con tolerancia de ventana)
         Persiste en st.session_state[key_prefix + "_user"]
         """
         sess_user_key = f"{key_prefix}_user"
@@ -200,8 +221,8 @@ class AuthManager:
         u_key = f"{key_prefix}_username"
         p_key = f"{key_prefix}_password"
 
+        # Ya autenticado
         if sess_user_key in st.session_state and st.session_state[sess_user_key]:
-            # Ya autenticado
             return st.session_state[sess_user_key]
 
         st.markdown("### Iniciar sesión")
@@ -210,11 +231,10 @@ class AuthManager:
 
         # Paso 1: credenciales
         if st.button("Ingresar"):
-            user = self.store.get_user(username.strip()) if username else None
+            user = self.store.get_user((username or "").strip()) if username else None
             if not user or not verify_password(password, user.password_hash):
                 st.error("❌ Usuario o contraseña incorrectos.")
                 return None
-            # Guardamos usuario 'pendiente de MFA'
             st.session_state[step_key] = "mfa"
             st.session_state[sess_user_key] = None
             st.session_state[f"{key_prefix}_pending_username"] = user.username
@@ -229,27 +249,32 @@ class AuthManager:
                 st.session_state.pop(step_key, None)
                 return None
 
-            # Mostrar QR si el usuario aún no está enrolado
             secret = self._ensure_mfa_secret(user)
             uri = self.provisioning_uri(user)
             qr = self.qr_png_base64(uri)
+
             with st.expander("Configurar MFA (solo si aún no lo hiciste)"):
                 st.markdown("Escanea este QR con Google Authenticator / Authy:")
                 st.image(f"data:image/png;base64,{qr}")
                 st.code(f"Clave secreta (backup): {secret}")
 
+            if debug:
+                self._render_debug_totp(secret)
+
             otp = st.text_input("Código de 6 dígitos (MFA)", max_chars=6)
             if st.button("Verificar MFA"):
+                otp = (otp or "").strip().replace(" ", "")
                 totp = pyotp.TOTP(secret)
-                if totp.verify(otp, valid_window=1):
+                # valid_window=2 => acepta el paso actual y ±1 paso extra (~30-60s de tolerancia)
+                if totp.verify(otp, valid_window=2):
                     st.success("✅ Autenticación correcta.")
                     st.session_state[sess_user_key] = user
                     st.session_state.pop(step_key, None)
-                    # Limpieza de campos
                     for k in (u_key, p_key, f"{key_prefix}_pending_username"):
                         st.session_state.pop(k, None)
-                    time.sleep(0.3)
+                    time.sleep(0.2)
                     st.rerun()
                 else:
-                    st.error("❌ Código MFA inválido.")
+                    st.error("❌ Código MFA inválido. Revisa hora del servidor y del teléfono, y vuelve a intentar.")
         return None
+
