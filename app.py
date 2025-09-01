@@ -30,23 +30,39 @@ s3_store = S3UserStore(
     seeder=seeder,
 )
 auth = AuthManager(s3_store, issuer_name="InsurApp")
+# Asegura credenciales desde st.secrets
 boto3.setup_default_session(
     aws_access_key_id=st.secrets["aws"]["access_key_id"],
     aws_secret_access_key=st.secrets["aws"]["secret_access_key"],
     region_name=st.secrets["aws"]["region"],
 )
 
-s3 = boto3.client("s3", region_name=st.secrets["aws"]["region"])
-st.write("Buckets visibles con estas credenciales:",
-         [b["Name"] for b in s3.list_buckets()["Buckets"]])
-
 bucket = st.secrets["aws"]["bucket_name"]
+region = st.secrets["aws"]["region"]
+s3 = boto3.client("s3", region_name=region)
+
+# 1) Intenta obtener región real del bucket (no requiere ListBuckets)
+real_region = None
 try:
-    s3.head_bucket(Bucket=bucket)
-    loc = s3.get_bucket_location(Bucket=bucket)["LocationConstraint"] or "us-east-1"
-    st.success(f"Bucket '{bucket}' existe. Región real: {loc}")
+    resp = s3.get_bucket_location(Bucket=bucket)  # necesita s3:GetBucketLocation
+    real_region = resp.get("LocationConstraint") or "us-east-1"
 except ClientError as e:
-    st.error(f"No se pudo acceder al bucket '{bucket}': {e}")
+    st.warning(f"get_bucket_location falló: {e}")
+
+# Si conocemos la región real y no coincide, avisa
+if real_region and real_region != region:
+    st.error(f"El bucket '{bucket}' está en región '{real_region}', "
+             f"pero tus secrets dicen '{region}'. Actualiza [aws].region a '{real_region}'.")
+    st.stop()
+
+# 2) Comprueba acceso de escritura al prefijo auth/users sin listar
+try:
+    s3.put_object(Bucket=bucket, Key="auth/users/.healthcheck", Body=b"", ACL="private")
+    st.success(f"S3 OK: acceso de escritura al bucket '{bucket}' en prefijo 'auth/users/'.")
+except ClientError as e:
+    code = e.response.get("Error", {}).get("Code")
+    st.error(f"No se pudo escribir en s3://{bucket}/auth/users/.healthcheck (Error {code}). "
+             "Verifica que el bucket exista y la policy permita PutObject en ese prefijo.")
     st.stop()
 
 # =========================
