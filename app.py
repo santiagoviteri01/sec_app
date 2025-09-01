@@ -8,7 +8,36 @@ from auth_mfa import (
 )
 
 st.set_page_config(page_title="InsurApp Login", layout="centered")
+# --- Diagnóstico S3 (antes de S3UserStore) ---
+import boto3
+from botocore.exceptions import ClientError
 
+# Si no lo hiciste ya: inicializa la sesión con st.secrets
+boto3.setup_default_session(
+    aws_access_key_id=st.secrets["aws"]["access_key_id"],
+    aws_secret_access_key=st.secrets["aws"]["secret_access_key"],
+    region_name=st.secrets["aws"]["region"],
+)
+
+bucket = st.secrets["aws"]["bucket_name"]
+region = st.secrets["aws"]["region"]
+s3 = boto3.client("s3", region_name=region)
+
+st.write("S3 región configurada:", region)
+st.write("S3 bucket configurado:", bucket)
+
+try:
+    s3.head_bucket(Bucket=bucket)
+    # Ojo: si el bucket está en otra región, get_bucket_location te da la real
+    loc = s3.get_bucket_location(Bucket=bucket)["LocationConstraint"] or "us-east-1"
+    st.write("S3 bucket location real:", loc)
+    if loc != region:
+        st.error(f"El bucket está en {loc}, pero tu cliente está en {region}. "
+                 f"Cambia [aws].region en secrets.toml a '{loc}'.")
+        st.stop()
+except ClientError as e:
+    st.error(f"No se pudo acceder al bucket '{bucket}'. Error: {e}")
+    st.stop()
 # =========================
 # 1) Email: usa st.secrets
 # =========================
