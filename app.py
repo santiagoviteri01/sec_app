@@ -12,7 +12,15 @@ st.set_page_config(page_title="InsurApp Login", layout="centered")
 # Pégalo en tu app antes de crear S3UserStore
 import streamlit as st, boto3
 from botocore.exceptions import ClientError
+from auth_mfa import S3UserStore
 
+s3_store = S3UserStore(
+    bucket=st.secrets["aws"]["bucket_name"],     # "insurapp-uploader"
+    prefix="auth/users",                         # carpeta dentro del bucket
+    aws_region=st.secrets["aws"]["region"],      # debe coincidir con la región REAL del bucket
+    seeder=seeder,
+)
+auth = AuthManager(s3_store, issuer_name="InsurApp")
 boto3.setup_default_session(
     aws_access_key_id=st.secrets["aws"]["access_key_id"],
     aws_secret_access_key=st.secrets["aws"]["secret_access_key"],
