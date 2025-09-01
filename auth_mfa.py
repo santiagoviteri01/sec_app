@@ -7,15 +7,17 @@ from datetime import datetime, timedelta, timezone
 from html import escape
 from textwrap import dedent
 
-# === Opcional (backend en Google Sheets) ===
-try:
-    import gspread
-    from google.oauth2.service_account import Credentials
-except Exception:
-    gspread = None
-    Credentials = None
+import streamlit as st
+import pyotp
+import qrcode
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# ⬇️ IMPORT CLAVE
+try:
+    from passlib.context import CryptContext
+except Exception as e:
+    raise RuntimeError(
+        "Falta la dependencia 'passlib'. Agrega 'passlib[bcrypt]' a requirements.txt y vuelve a desplegar."
+    ) from e
 
 
 # ---------- Modelo ----------
