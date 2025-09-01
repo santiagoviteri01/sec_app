@@ -1,34 +1,31 @@
+# app.py
 import streamlit as st
 from auth_mfa import AuthManager, DictUserStore, hash_password
 
 st.set_page_config(page_title="Demo Auth MFA", layout="centered")
 
-# --- Usuarios en memoria para pruebas ---
-USUARIOS = {
-    "demo": {
-        "display_name": "Usuario Demo",
-        "role": "admin",
-        # Para demo: hasheamos en runtime. En producción pega un hash fijo.
-        "password_hash": hash_password("demo123"),
-        # "mfa_secret": None  # se autogenera al primer login
-    }
-}
+@st.cache_resource
+def get_store():
+    return DictUserStore({
+        "demo": {
+            "display_name": "Usuario Demo",
+            "role": "admin",
+            "password_hash": hash_password("demo123"),
+            # "mfa_secret": None  # se autogenera y se persiste en session_state
+        }
+    })
 
-store = DictUserStore(USUARIOS)
+store = get_store()
 auth = AuthManager(store, issuer_name="InsurApp-Demo")
 
-# --- Login + MFA ---
-user = auth.login(key_prefix="demoapp")
+user = auth.login(key_prefix="demoapp", debug=True)  # debug=True muestra el TOTP del servidor
 if not user:
     st.stop()
 
-# --- Contenido protegido ---
 st.success(f"¡Bienvenido, {user.display_name}! (rol: {user.role})")
-st.write("Esta es la zona protegida de tu app de pruebas ✅")
-
-# --- Logout simple ---
 if st.button("Cerrar sesión"):
     for k in list(st.session_state.keys()):
         if k.startswith("demoapp"):
             st.session_state.pop(k)
-    st.experimental_rerun()
+    st.rerun()
+
