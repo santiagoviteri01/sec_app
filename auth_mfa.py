@@ -1,15 +1,11 @@
 # auth_mfa.py
 from __future__ import annotations
-import io
-import time
-import base64
+import io, time, base64, json, hashlib, hmac, secrets
 from dataclasses import dataclass
 from typing import Optional, Dict
-
-import streamlit as st
-import pyotp
-import qrcode
-from passlib.context import CryptContext
+from datetime import datetime, timedelta, timezone
+from html import escape
+from textwrap import dedent
 
 # === Opcional (backend en Google Sheets) ===
 try:
@@ -31,6 +27,10 @@ class User:
     password_hash: str
     mfa_secret: Optional[str] = None
     email: Optional[str] = None
+        # meta de reset (opcionales)
+    reset_token_hash: Optional[str] = None
+    reset_token_expiry: Optional[str] = None
+    reset_requested_at: Optional[str] = None
 
 
 # ---------- UserStore base ----------
@@ -327,36 +327,21 @@ class AuthManager:
         return True
 
     def verify_reset_token(self, username: str, token: str) -> bool:
-        """Valida hash y expiración del token."""
-        user = self.store.get_user((username or "").strip())
+        uname = (username or "").strip().lower()
+        user = self.store.get_user(uname)
         if not user:
             return False
-        # Cargar campos desde store (pueden estar en dict o sheet)
-        # Nota: accedemos a través de store.get_user y suponemos que update_user guarda los campos.
-        # Para SheetUserStore, asegúrate de tener las columnas.
-        # Obtenemos el usuario de nuevo por si el store no expone directamente los nuevos campos
-        # (en DictUserStore sí estarán, en SheetUserStore también si las columnas existen).
-        # Recupero valores "a mano" según backend:
-        reset_hash = getattr(user, "reset_token_hash", None)
-        reset_exp = getattr(user, "reset_token_expiry", None)
 
-        # Si el modelo User no tiene esos atributos, intenta leerlos directamente (DictUserStore)
-        # Añadimos una lectura directa del store si fuera necesario:
-        if reset_hash is None or reset_exp is None:
-            if isinstance(self.store, DictUserStore):
-                d = self.store.users.get(username, {})
-                reset_hash = d.get("reset_token_hash")
-                reset_exp = d.get("reset_token_expiry")
-            elif isinstance(self.store, SheetUserStore):
-                # Relee crudo desde la Sheet
-                # (re-usa API pública: get_user ya mapea columnas conocidas,
-                # si deseas, puedes extender User para incluir estos campos)
-                pass
+        reset_hash = getattr(user, "reset_token_hash", None)
+        reset_exp  = getattr(user, "reset_token_expiry", None)
+
+        # Si no vino en el modelo User, intenta leer crudo desde el store (S3)
+        if (not reset_hash or not reset_exp) and hasattr(self.store, "get_reset_meta"):
+            reset_hash, reset_exp = self.store.get_reset_meta(uname)
 
         if not reset_hash or not reset_exp:
             return False
 
-        # Validar expiración
         try:
             exp_dt = datetime.fromisoformat(reset_exp)
         except Exception:
@@ -364,79 +349,15 @@ class AuthManager:
         if self._now_utc() > exp_dt:
             return False
 
-        # Validar hash
         return self._constant_time_equal(reset_hash, self._hash_token(token))
 
     def finalize_password_reset(self, username: str, new_password: str) -> bool:
-        """
-        Setea nueva contraseña y limpia token. Devuelve True si ok.
-        """
-        user = self.store.get_user((username or "").strip())
+        uname = (username or "").strip().lower()
+        user = self.store.get_user(uname)
         if not user:
             return False
 
         new_hash = hash_password(new_password)
-        # Limpiamos los campos de token
-        self.store.update_user(
-            user.username,
-            password_hash=new_hash,
-            reset_token_hash="",
-            reset_token_expiry="",
-            reset_requested_at="",
-        )
-        return True
-
-    def verify_reset_token(self, username: str, token: str) -> bool:
-        """Valida hash y expiración del token."""
-        user = self.store.get_user((username or "").strip())
-        if not user:
-            return False
-        # Cargar campos desde store (pueden estar en dict o sheet)
-        # Nota: accedemos a través de store.get_user y suponemos que update_user guarda los campos.
-        # Para SheetUserStore, asegúrate de tener las columnas.
-        # Obtenemos el usuario de nuevo por si el store no expone directamente los nuevos campos
-        # (en DictUserStore sí estarán, en SheetUserStore también si las columnas existen).
-        # Recupero valores "a mano" según backend:
-        reset_hash = getattr(user, "reset_token_hash", None)
-        reset_exp = getattr(user, "reset_token_expiry", None)
-
-        # Si el modelo User no tiene esos atributos, intenta leerlos directamente (DictUserStore)
-        # Añadimos una lectura directa del store si fuera necesario:
-        if reset_hash is None or reset_exp is None:
-            if isinstance(self.store, DictUserStore):
-                d = self.store.users.get(username, {})
-                reset_hash = d.get("reset_token_hash")
-                reset_exp = d.get("reset_token_expiry")
-            elif isinstance(self.store, SheetUserStore):
-                # Relee crudo desde la Sheet
-                # (re-usa API pública: get_user ya mapea columnas conocidas,
-                # si deseas, puedes extender User para incluir estos campos)
-                pass
-
-        if not reset_hash or not reset_exp:
-            return False
-
-        # Validar expiración
-        try:
-            exp_dt = datetime.fromisoformat(reset_exp)
-        except Exception:
-            return False
-        if self._now_utc() > exp_dt:
-            return False
-
-        # Validar hash
-        return self._constant_time_equal(reset_hash, self._hash_token(token))
-
-    def finalize_password_reset(self, username: str, new_password: str) -> bool:
-        """
-        Setea nueva contraseña y limpia token. Devuelve True si ok.
-        """
-        user = self.store.get_user((username or "").strip())
-        if not user:
-            return False
-
-        new_hash = hash_password(new_password)
-        # Limpiamos los campos de token
         self.store.update_user(
             user.username,
             password_hash=new_hash,
@@ -534,8 +455,7 @@ class S3UserStore(BaseUserStore):
         )
 
     def _key(self, username: str) -> str:
-        # Permitimos @ y . en la key (S3 lo soporta)
-        uname = (username or "").strip()
+        uname = (username or "").strip().lower()
         return f"{self.prefix}/{uname}.json"
 
     def _load_json(self, key: str) -> Optional[Dict]:
@@ -564,14 +484,14 @@ class S3UserStore(BaseUserStore):
     def get_user(self, username: str) -> Optional[User]:
         if not username:
             return None
-        key = self._key(username)
+        uname = (username or "").strip().lower()
+        key = self._key(uname)
         data = self._load_json(key)
 
         # Si no está en S3 y hay seeder => sembrar
         if data is None and self.seeder:
-            seed = self.seeder.find_user(username)
+            seed = self.seeder.find_user(uname)
             if seed and seed.get("cedula"):
-                # hash de cédula como password inicial
                 pwd_hash = hash_password(seed["cedula"])
                 data = {
                     "username": seed["username"],
@@ -589,16 +509,21 @@ class S3UserStore(BaseUserStore):
         if not data:
             return None
 
-        # Mapear a User (los campos extra se quedan en el JSON)
         return User(
-            username=data.get("username", username),
-            display_name=data.get("display_name") or username,
+            username=data.get("username", uname),
+            display_name=data.get("display_name") or uname,
             role=data.get("role", "viewer"),
             password_hash=data.get("password_hash", ""),
             mfa_secret=data.get("mfa_secret") or None,
             email=data.get("email") or None,
+            reset_token_hash=data.get("reset_token_hash") or None,
+            reset_token_expiry=data.get("reset_token_expiry") or None,
+            reset_requested_at=data.get("reset_requested_at") or None,
         )
-
+    def get_reset_meta(self, username: str) -> tuple[Optional[str], Optional[str]]:
+        uname = (username or "").strip().lower()
+        data = self._load_json(self._key(uname)) or {}
+        return data.get("reset_token_hash"), data.get("reset_token_expiry")
     def update_user(self, username: str, **fields) -> None:
         if not username:
             return
