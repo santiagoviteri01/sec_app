@@ -1,6 +1,8 @@
 # app.py
 import os
 import streamlit as st
+from pathlib import Path
+
 from auth_mfa import (
     AuthManager, S3UserStore, SheetSeeder, hash_password  # <- NUEVOS
 )
