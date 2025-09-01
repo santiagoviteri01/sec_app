@@ -278,3 +278,171 @@ class AuthManager:
                     st.error("❌ Código MFA inválido. Revisa hora del servidor y del teléfono, y vuelve a intentar.")
         return None
 
+    def _now_utc(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def _hash_token(self, token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def _constant_time_equal(self, a: str, b: str) -> bool:
+        return hmac.compare_digest(a or "", b or "")
+
+    def request_password_reset(self, username: str, app_base_url: str, send_email_func) -> bool:
+        user = self.store.get_user((username or "").strip())
+        if not user or not user.email:
+            return False
+
+        # Generar token y persistir hash + expiry (1 hora)
+        token = secrets.token_urlsafe(32)
+        token_hash = self._hash_token(token)
+        expiry = (self._now_utc() + timedelta(hours=1)).isoformat()
+
+        # Guardar en el store
+        self.store.update_user(
+            user.username,
+            reset_token_hash=token_hash,
+            reset_token_expiry=expiry,
+            reset_requested_at=self._now_utc().isoformat(),
+        )
+
+        # Construir link de reseteo
+        reset_link = f"{app_base_url}?reset={token}&u={user.username}"
+
+        # Enviar email
+        subject = "Restablecer contraseña - InsurApp"
+        
+        display = escape(user.display_name or user.username)
+        reset_link = f"{app_base_url}?reset={token}&u={user.username}"
+        
+        html = dedent(f'''\
+        <p>Hola {display},</p>
+        <p>Recibimos una solicitud para restablecer tu contraseña.</p>
+        <p>Haz clic en el siguiente enlace para continuar (válido 1 hora):<br>
+        <a href="{reset_link}">{reset_link}</a></p>
+        <p>Si tú no solicitaste este cambio, ignora este mensaje.</p>
+        <p>— InsurApp</p>
+        ''')
+        
+        send_email_func(to=user.email, subject=subject, html=html)
+        return True
+
+    def verify_reset_token(self, username: str, token: str) -> bool:
+        """Valida hash y expiración del token."""
+        user = self.store.get_user((username or "").strip())
+        if not user:
+            return False
+        # Cargar campos desde store (pueden estar en dict o sheet)
+        # Nota: accedemos a través de store.get_user y suponemos que update_user guarda los campos.
+        # Para SheetUserStore, asegúrate de tener las columnas.
+        # Obtenemos el usuario de nuevo por si el store no expone directamente los nuevos campos
+        # (en DictUserStore sí estarán, en SheetUserStore también si las columnas existen).
+        # Recupero valores "a mano" según backend:
+        reset_hash = getattr(user, "reset_token_hash", None)
+        reset_exp = getattr(user, "reset_token_expiry", None)
+
+        # Si el modelo User no tiene esos atributos, intenta leerlos directamente (DictUserStore)
+        # Añadimos una lectura directa del store si fuera necesario:
+        if reset_hash is None or reset_exp is None:
+            if isinstance(self.store, DictUserStore):
+                d = self.store.users.get(username, {})
+                reset_hash = d.get("reset_token_hash")
+                reset_exp = d.get("reset_token_expiry")
+            elif isinstance(self.store, SheetUserStore):
+                # Relee crudo desde la Sheet
+                # (re-usa API pública: get_user ya mapea columnas conocidas,
+                # si deseas, puedes extender User para incluir estos campos)
+                pass
+
+        if not reset_hash or not reset_exp:
+            return False
+
+        # Validar expiración
+        try:
+            exp_dt = datetime.fromisoformat(reset_exp)
+        except Exception:
+            return False
+        if self._now_utc() > exp_dt:
+            return False
+
+        # Validar hash
+        return self._constant_time_equal(reset_hash, self._hash_token(token))
+
+    def finalize_password_reset(self, username: str, new_password: str) -> bool:
+        """
+        Setea nueva contraseña y limpia token. Devuelve True si ok.
+        """
+        user = self.store.get_user((username or "").strip())
+        if not user:
+            return False
+
+        new_hash = hash_password(new_password)
+        # Limpiamos los campos de token
+        self.store.update_user(
+            user.username,
+            password_hash=new_hash,
+            reset_token_hash="",
+            reset_token_expiry="",
+            reset_requested_at="",
+        )
+        return True
+
+    def verify_reset_token(self, username: str, token: str) -> bool:
+        """Valida hash y expiración del token."""
+        user = self.store.get_user((username or "").strip())
+        if not user:
+            return False
+        # Cargar campos desde store (pueden estar en dict o sheet)
+        # Nota: accedemos a través de store.get_user y suponemos que update_user guarda los campos.
+        # Para SheetUserStore, asegúrate de tener las columnas.
+        # Obtenemos el usuario de nuevo por si el store no expone directamente los nuevos campos
+        # (en DictUserStore sí estarán, en SheetUserStore también si las columnas existen).
+        # Recupero valores "a mano" según backend:
+        reset_hash = getattr(user, "reset_token_hash", None)
+        reset_exp = getattr(user, "reset_token_expiry", None)
+
+        # Si el modelo User no tiene esos atributos, intenta leerlos directamente (DictUserStore)
+        # Añadimos una lectura directa del store si fuera necesario:
+        if reset_hash is None or reset_exp is None:
+            if isinstance(self.store, DictUserStore):
+                d = self.store.users.get(username, {})
+                reset_hash = d.get("reset_token_hash")
+                reset_exp = d.get("reset_token_expiry")
+            elif isinstance(self.store, SheetUserStore):
+                # Relee crudo desde la Sheet
+                # (re-usa API pública: get_user ya mapea columnas conocidas,
+                # si deseas, puedes extender User para incluir estos campos)
+                pass
+
+        if not reset_hash or not reset_exp:
+            return False
+
+        # Validar expiración
+        try:
+            exp_dt = datetime.fromisoformat(reset_exp)
+        except Exception:
+            return False
+        if self._now_utc() > exp_dt:
+            return False
+
+        # Validar hash
+        return self._constant_time_equal(reset_hash, self._hash_token(token))
+
+    def finalize_password_reset(self, username: str, new_password: str) -> bool:
+        """
+        Setea nueva contraseña y limpia token. Devuelve True si ok.
+        """
+        user = self.store.get_user((username or "").strip())
+        if not user:
+            return False
+
+        new_hash = hash_password(new_password)
+        # Limpiamos los campos de token
+        self.store.update_user(
+            user.username,
+            password_hash=new_hash,
+            reset_token_hash="",
+            reset_token_expiry="",
+            reset_requested_at="",
+        )
+        return True
+
