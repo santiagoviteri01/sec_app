@@ -517,15 +517,21 @@ class S3UserStore(BaseUserStore):
     """
     def __init__(self, *, bucket: str, prefix: str = "auth/users",
                  aws_region: Optional[str] = None,
+                 aws_access_key_id: Optional[str] = None,
+                 aws_secret_access_key: Optional[str] = None,
+                 aws_session_token: Optional[str] = None,
                  seeder: Optional[SheetSeeder] = None):
         self.bucket = bucket
         self.prefix = prefix.strip("/")
-
-        session_kwargs = {}
-        if aws_region:
-            session_kwargs["region_name"] = aws_region
-        self.s3 = boto3.client("s3", **session_kwargs)
         self.seeder = seeder
+
+        self.s3 = boto3.client(
+            "s3",
+            region_name=aws_region,
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
+            aws_session_token=aws_session_token,
+        )
 
     def _key(self, username: str) -> str:
         # Permitimos @ y . en la key (S3 lo soporta)
