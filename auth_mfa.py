@@ -19,6 +19,7 @@ except Exception as e:
         "Falta la dependencia 'passlib'. Agrega 'passlib[bcrypt]' a requirements.txt y vuelve a desplegar."
     ) from e
 
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ---------- Modelo ----------
 @dataclass
