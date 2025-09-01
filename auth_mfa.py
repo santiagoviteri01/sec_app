@@ -381,16 +381,24 @@ class SheetSeeder:
     campos mínimos para crear al usuario en S3.
     """
     def __init__(self, *, sheet_key: str, creds_dict: dict, worksheet_name: str = "usuarios",
-                 email_col="CORREO ELECTRÓNICO", cedula_col="NÚMERO IDENTIFICACIÓN",
+                 email_col="CORREO ELECTRÓNICO", cedula_col="CÉDULA",
                  name_col="NOMBRE COMPLETO", role_default="cliente"):
-        if gspread is None or Credentials is None:
-            raise RuntimeError("gspread/google-auth requeridos para usar SheetSeeder.")
-        creds = Credentials.from_service_account_info(creds_dict, scopes=[
-            "https://www.googleapis.com/auth/spreadsheets"
-        ])
+        # Import local para evitar NameError si el módulo no existe o el orden de import falló
+        try:
+            import gspread  # type: ignore
+            from google.oauth2.service_account import Credentials  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                "Faltan dependencias para Google Sheets. "
+                "Instala 'gspread' y 'google-auth' en requirements.txt."
+            ) from e
+
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         self.gc = gspread.authorize(creds)
         self.sh = self.gc.open_by_key(sheet_key)
         self.ws = self.sh.worksheet(worksheet_name)
+
         self.headers = [h.strip() for h in self.ws.row_values(1)]
         self.idx = {name: i for i, name in enumerate(self.headers)}
         self.email_col = email_col
@@ -406,19 +414,20 @@ class SheetSeeder:
         data = self._dump_all()
         if not data or len(data) < 2:
             return None
+        target = (email or "").strip().lower()
         for i in range(1, len(data)):
             row = data[i] + [""] * max(0, len(self.headers) - len(data[i]))
             try:
                 email_val = row[self.idx[self.email_col]].strip().lower()
             except KeyError:
+                # columna mal nombrada
                 return None
-            if email_val == (email or "").strip().lower():
-                # Extrae campos
+            if email_val == target:
                 cedula = row[self.idx.get(self.cedula_col, -1)].strip() if self.cedula_col in self.idx else ""
-                nombre = row[self.idx.get(self.name_col, -1)].strip() if self.name_col in self.idx else email
+                nombre = row[self.idx.get(self.name_col, -1)].strip() if self.name_col in self.idx else target
                 return {
                     "username": email_val,
-                    "display_name": nombre or email,
+                    "display_name": nombre or target,
                     "role": self.role_default,
                     "email": email_val,
                     "cedula": cedula,
