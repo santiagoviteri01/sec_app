@@ -381,7 +381,7 @@ class SheetSeeder:
     campos mínimos para crear al usuario en S3.
     """
     def __init__(self, *, sheet_key: str, creds_dict: dict, worksheet_name: str = "usuarios",
-                 email_col="CORREO ELECTRÓNICO", cedula_col="CÉDULA",
+                 email_col="CORREO ELECTRÓNICO", cedula_col="NÚMERO IDENTIFICACIÓN",
                  name_col="NOMBRE COMPLETO", role_default="cliente"):
         if gspread is None or Credentials is None:
             raise RuntimeError("gspread/google-auth requeridos para usar SheetSeeder.")
