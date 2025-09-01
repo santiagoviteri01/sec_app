@@ -446,3 +446,160 @@ class AuthManager:
         )
         return True
 
+import json
+import boto3
+from botocore.exceptions import ClientError
+
+# ---------- Seeder desde Google Sheets (para poblar S3 si falta) ----------
+class SheetSeeder:
+    """
+    Busca un usuario por email en Google Sheets y devuelve un dict con
+    campos mínimos para crear al usuario en S3.
+    """
+    def __init__(self, *, sheet_key: str, creds_dict: dict, worksheet_name: str = "usuarios",
+                 email_col="CORREO ELECTRÓNICO", cedula_col="CÉDULA",
+                 name_col="NOMBRE COMPLETO", role_default="cliente"):
+        if gspread is None or Credentials is None:
+            raise RuntimeError("gspread/google-auth requeridos para usar SheetSeeder.")
+        creds = Credentials.from_service_account_info(creds_dict, scopes=[
+            "https://www.googleapis.com/auth/spreadsheets"
+        ])
+        self.gc = gspread.authorize(creds)
+        self.sh = self.gc.open_by_key(sheet_key)
+        self.ws = self.sh.worksheet(worksheet_name)
+        self.headers = [h.strip() for h in self.ws.row_values(1)]
+        self.idx = {name: i for i, name in enumerate(self.headers)}
+        self.email_col = email_col
+        self.cedula_col = cedula_col
+        self.name_col = name_col
+        self.role_default = role_default
+
+    @st.cache_data(ttl=60, show_spinner=False)
+    def _dump_all(self):
+        return self.ws.get_all_values()
+
+    def find_user(self, email: str) -> Optional[Dict]:
+        data = self._dump_all()
+        if not data or len(data) < 2:
+            return None
+        for i in range(1, len(data)):
+            row = data[i] + [""] * max(0, len(self.headers) - len(data[i]))
+            try:
+                email_val = row[self.idx[self.email_col]].strip().lower()
+            except KeyError:
+                return None
+            if email_val == (email or "").strip().lower():
+                # Extrae campos
+                cedula = row[self.idx.get(self.cedula_col, -1)].strip() if self.cedula_col in self.idx else ""
+                nombre = row[self.idx.get(self.name_col, -1)].strip() if self.name_col in self.idx else email
+                return {
+                    "username": email_val,
+                    "display_name": nombre or email,
+                    "role": self.role_default,
+                    "email": email_val,
+                    "cedula": cedula,
+                }
+        return None
+
+
+# ---------- Store en S3 ----------
+class S3UserStore(BaseUserStore):
+    """
+    Guarda cada usuario como un JSON en:
+      s3://{bucket}/{prefix}/{username}.json
+
+    Campos JSON esperados:
+      username, display_name, role, email, password_hash, mfa_secret,
+      reset_token_hash, reset_token_expiry, reset_requested_at, created_at, updated_at
+
+    Si no encuentra el usuario, intenta sembrarlo con SheetSeeder
+    (password inicial = hash(cedula)).
+    """
+    def __init__(self, *, bucket: str, prefix: str = "auth/users",
+                 aws_region: Optional[str] = None,
+                 seeder: Optional[SheetSeeder] = None):
+        self.bucket = bucket
+        self.prefix = prefix.strip("/")
+
+        session_kwargs = {}
+        if aws_region:
+            session_kwargs["region_name"] = aws_region
+        self.s3 = boto3.client("s3", **session_kwargs)
+        self.seeder = seeder
+
+    def _key(self, username: str) -> str:
+        # Permitimos @ y . en la key (S3 lo soporta)
+        uname = (username or "").strip()
+        return f"{self.prefix}/{uname}.json"
+
+    def _load_json(self, key: str) -> Optional[Dict]:
+        try:
+            obj = self.s3.get_object(Bucket=self.bucket, Key=key)
+            return json.loads(obj["Body"].read().decode("utf-8"))
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
+                return None
+            raise
+
+    def _save_json(self, key: str, data: Dict) -> None:
+        data = dict(data)
+        # timestamps
+        now_iso = datetime.utcnow().isoformat() + "Z"
+        if "created_at" not in data or not data["created_at"]:
+            data["created_at"] = now_iso
+        data["updated_at"] = now_iso
+        self.s3.put_object(
+            Bucket=self.bucket,
+            Key=key,
+            Body=json.dumps(data, ensure_ascii=False).encode("utf-8"),
+            ContentType="application/json",
+            ACL="private"
+        )
+
+    def get_user(self, username: str) -> Optional[User]:
+        if not username:
+            return None
+        key = self._key(username)
+        data = self._load_json(key)
+
+        # Si no está en S3 y hay seeder => sembrar
+        if data is None and self.seeder:
+            seed = self.seeder.find_user(username)
+            if seed and seed.get("cedula"):
+                # hash de cédula como password inicial
+                pwd_hash = hash_password(seed["cedula"])
+                data = {
+                    "username": seed["username"],
+                    "display_name": seed["display_name"],
+                    "role": seed["role"],
+                    "email": seed["email"],
+                    "password_hash": pwd_hash,
+                    "mfa_secret": "",
+                    "reset_token_hash": "",
+                    "reset_token_expiry": "",
+                    "reset_requested_at": "",
+                }
+                self._save_json(key, data)
+
+        if not data:
+            return None
+
+        # Mapear a User (los campos extra se quedan en el JSON)
+        return User(
+            username=data.get("username", username),
+            display_name=data.get("display_name") or username,
+            role=data.get("role", "viewer"),
+            password_hash=data.get("password_hash", ""),
+            mfa_secret=data.get("mfa_secret") or None,
+            email=data.get("email") or None,
+        )
+
+    def update_user(self, username: str, **fields) -> None:
+        if not username:
+            return
+        key = self._key(username)
+        data = self._load_json(key) or {"username": username}
+        # merge
+        for k, v in fields.items():
+            data[k] = v
+        self._save_json(key, data)
