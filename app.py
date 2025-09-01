@@ -13,7 +13,16 @@ st.set_page_config(page_title="InsurApp Login", layout="centered")
 import streamlit as st, boto3
 from botocore.exceptions import ClientError
 from auth_mfa import S3UserStore
-
+creds_dict = dict(st.secrets["gcp_service_account"])
+seeder = SheetSeeder(
+    sheet_key="13hY8la9Xke5-wu3vmdB-tNKtY5D6ud4FZrJG2_HtKd8",   # <--- tu sheet
+    creds_dict=creds_dict,
+    worksheet_name="aseguradosatlantida",                                   # o la que uses
+    email_col="CORREO ELECTRÓNICO",
+    cedula_col="CÉDULA",                                         # ajusta al nombre exacto de tu columna
+    name_col="NOMBRE COMPLETO",
+    role_default="cliente"
+)
 s3_store = S3UserStore(
     bucket=st.secrets["aws"]["bucket_name"],     # "insurapp-uploader"
     prefix="auth/users",                         # carpeta dentro del bucket
@@ -70,30 +79,11 @@ def send_email_smtp(*, to: str, subject: str, html: str):
 # 2) Seeder desde tu Google Sheet (lee de st.secrets)
 # ====================================================
 # Asegúrate que en secrets tengas el bloque [gcp_service_account] y el sheet_key correcto.
-creds_dict = dict(st.secrets["gcp_service_account"])
-seeder = SheetSeeder(
-    sheet_key="13hY8la9Xke5-wu3vmdB-tNKtY5D6ud4FZrJG2_HtKd8",   # <--- tu sheet
-    creds_dict=creds_dict,
-    worksheet_name="aseguradosatlantida",                                   # o la que uses
-    email_col="CORREO ELECTRÓNICO",
-    cedula_col="CÉDULA",                                         # ajusta al nombre exacto de tu columna
-    name_col="NOMBRE COMPLETO",
-    role_default="cliente"
-)
 
 # ======================================
 # 3) Store S3 (fuente de verdad de auth)
 # ======================================
-s3_store = S3UserStore(
-    bucket=st.secrets["aws"]["bucket_name"],
-    prefix="auth/users",
-    aws_region=st.secrets["aws"]["region"],
-    aws_access_key_id=st.secrets["aws"]["access_key_id"],
-    aws_secret_access_key=st.secrets["aws"]["secret_access_key"],
-    seeder=seeder,
-)
 
-auth = AuthManager(s3_store, issuer_name="InsurApp")
 
 # =========================================================
 # 4) Manejar link de reseteo (ANTES del login normal/MFA)
