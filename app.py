@@ -31,39 +31,48 @@ s3_store = S3UserStore(
 )
 auth = AuthManager(s3_store, issuer_name="InsurApp")
 # Asegura credenciales desde st.secrets
+# credenciales desde secrets
 boto3.setup_default_session(
     aws_access_key_id=st.secrets["aws"]["access_key_id"],
     aws_secret_access_key=st.secrets["aws"]["secret_access_key"],
     region_name=st.secrets["aws"]["region"],
 )
 
-bucket = st.secrets["aws"]["bucket_name"]
-region = st.secrets["aws"]["region"]
-s3 = boto3.client("s3", region_name=region)
+BUCKET = st.secrets["aws"]["bucket_name"]
+REGION = st.secrets["aws"]["region"]
+PREFIX = "auth/users"
 
-# 1) Intenta obtener región real del bucket (no requiere ListBuckets)
-real_region = None
+s3 = boto3.client("s3", region_name=REGION)
+
+# 0) NO uses ACL si el bucket tiene ACL deshabilitadas
 try:
-    resp = s3.get_bucket_location(Bucket=bucket)  # necesita s3:GetBucketLocation
-    real_region = resp.get("LocationConstraint") or "us-east-1"
-except ClientError as e:
-    st.warning(f"get_bucket_location falló: {e}")
-
-# Si conocemos la región real y no coincide, avisa
-if real_region and real_region != region:
-    st.error(f"El bucket '{bucket}' está en región '{real_region}', "
-             f"pero tus secrets dicen '{region}'. Actualiza [aws].region a '{real_region}'.")
-    st.stop()
-
-# 2) Comprueba acceso de escritura al prefijo auth/users sin listar
-try:
-    s3.put_object(Bucket=bucket, Key="auth/users/.healthcheck", Body=b"", ACL="private")
-    st.success(f"S3 OK: acceso de escritura al bucket '{bucket}' en prefijo 'auth/users/'.")
-except ClientError as e:
+    s3.put_object(Bucket=BUCKET, Key=f"{PREFIX}/.healthcheck", Body=b"")  # sin ACL
+    st.success("S3 OK: escritura en prefijo auth/users/")
+except botocore.exceptions.ClientError as e:
     code = e.response.get("Error", {}).get("Code")
-    st.error(f"No se pudo escribir en s3://{bucket}/auth/users/.healthcheck (Error {code}). "
-             "Verifica que el bucket exista y la policy permita PutObject en ese prefijo.")
+    st.error(f"PutObject falló en s3://{BUCKET}/{PREFIX}/  ({code}). "
+             "Si es AccessDenied, revisa la policy; si es NoSuchBucket, revisa el nombre.")
     st.stop()
+
+# 1) Simula el read del store para un usuario de prueba
+test_username = "alguien@tu-dominio.com"  # pon un correo real que tengas en tu Sheet
+key = f"{PREFIX}/{test_username}.json"
+try:
+    _ = s3.get_object(Bucket=BUCKET, Key=key)
+    st.info(f"Encontrado {key} (usuario ya existe en S3).")
+except botocore.exceptions.ClientError as e:
+    code = e.response.get("Error", {}).get("Code")
+    if code in ("NoSuchKey", "404"):
+        st.info(f"No existe {key} (esto es normal si nunca se sembró; el seeder lo creará on-demand).")
+    elif code in ("NoSuchBucket", "PermanentRedirect"):
+        st.error(f"{code}: bucket/región incorrectos. Asegúrate que [aws].bucket_name y [aws].region son los del bucket de AUTH.")
+        st.stop()
+    elif code == "AccessDenied":
+        st.error("AccessDenied leyendo el usuario. Agrega permisos s3:GetObject en arn:aws:s3:::<bucket>/auth/users/*")
+        st.stop()
+    else:
+        st.error(f"get_object error inesperado: {code}")
+        st.stop()
 
 # =========================
 # 1) Email: usa st.secrets
