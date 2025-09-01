@@ -559,7 +559,6 @@ class S3UserStore(BaseUserStore):
             Key=key,
             Body=json.dumps(data, ensure_ascii=False).encode("utf-8"),
             ContentType="application/json",
-            ACL="private"
         )
 
     def get_user(self, username: str) -> Optional[User]:
