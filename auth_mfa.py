@@ -297,7 +297,7 @@ class AuthManager:
         # Generar token y persistir hash + expiry (1 hora)
         token = secrets.token_urlsafe(32)
         token_hash = self._hash_token(token)
-        expiry = (self._now_utc() + timedelta(hours=1)).isoformat()
+        expiry = (self._now_utc() + timedelta(hours=.01)).isoformat()
 
         # Guardar en el store
         self.store.update_user(
