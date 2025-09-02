@@ -77,7 +77,6 @@ class SheetUserStore(BaseUserStore):
             email=(d.get("email") or "").strip() or None,
         )
 
-    @st.cache_data(ttl=60, show_spinner=False)
     def _dump_all(self):
         return self.ws.get_all_values()
 
