@@ -234,7 +234,7 @@ class AuthManager:
 
         # Paso 1: credenciales
         if st.button("Ingresar"):
-            user = self.store.get_user((username or "").strip()) if username else None
+            user = self.store.get_user((username or "").strip().lower()) if username else None
             if not user or not verify_password(password, user.password_hash):
                 st.error("❌ Usuario o contraseña incorrectos.")
                 return None
