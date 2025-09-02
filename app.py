@@ -116,7 +116,7 @@ if reset_token and reset_user:
     st.stop()
 
 # ========= 7) Login + MFA =========
-user = auth.login(key_prefix="insurapp", debug=False)  # <- prefijo corto; NO es el bucket
+user = auth.login(key_prefix="insurapp-uploader", debug=False)  # <- prefijo corto; NO es el bucket
 
 # ========= 8) ¿Olvidaste tu contraseña? =========
 if not user:
