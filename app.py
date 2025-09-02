@@ -48,7 +48,7 @@ seeder = SheetSeeder(
     creds_dict=creds_dict,
     worksheet_name="aseguradosatlantida",
     email_col="CORREO ELECTRÓNICO",
-    cedula_col="CÉDULA",
+    cedula_col="NÚMERO IDENTIFICACIÓN",
     name_col="NOMBRE COMPLETO",
     role_default="cliente",
 )
