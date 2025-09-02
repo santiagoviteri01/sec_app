@@ -475,8 +475,24 @@ class S3UserStore(BaseUserStore):
             obj = self.s3.get_object(Bucket=self.bucket, Key=key)
             return json.loads(obj["Body"].read().decode("utf-8"))
         except ClientError as e:
-            if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
+            code = e.response.get("Error", {}).get("Code", "Unknown")
+            # Normal: usuario aún no existe en S3
+            if code in ("NoSuchKey", "404"):
                 return None
+    
+            # Diagnóstico visible en la UI
+            import streamlit as st
+            if code == "AccessDenied":
+                st.error(f"S3 AccessDenied al leer s3://{self.bucket}/{key}. "
+                         f"Revisa la policy del usuario IAM: debe permitir "
+                         f"s3:GetObject en arn:aws:s3:::{self.bucket}/{self.prefix}/*")
+            elif code in ("PermanentRedirect", "AuthorizationHeaderMalformed"):
+                st.error("❗ Región incorrecta: el bucket está en otra región distinta a la configurada. "
+                         "Ajusta [aws].region en secrets a la región REAL del bucket.")
+            elif code == "NoSuchBucket":
+                st.error(f"❗ NoSuchBucket: el bucket '{self.bucket}' no existe (o el nombre está mal).")
+            else:
+                st.error(f"S3 get_object falló ({code}) para s3://{self.bucket}/{key}")
             raise
 
     def _save_json(self, key: str, data: Dict) -> None:
