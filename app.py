@@ -123,7 +123,7 @@ if not user:
     with st.expander("¿Olvidaste tu contraseña?"):
         username_fp = st.text_input("Ingresa tu usuario (correo) para enviarte el enlace")
         if st.button("Enviar enlace de restablecimiento"):
-            base_url = st.secrets["app"]["base_url"]
+            base_url = "https://secapp.streamlit.app/"
             ok = auth.request_password_reset(username_fp, base_url, send_email_smtp)
             if ok:
                 st.success("Te enviamos un correo con el enlace para restablecer tu contraseña (revisa SPAM).")
