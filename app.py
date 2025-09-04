@@ -43,7 +43,7 @@ except botocore.exceptions.ClientError as e:
 
 # ========= 3) Seeder desde Google Sheets =========
 creds_dict = dict(st.secrets["gcp_service_account"])
-seeder = SheetSeeder(
+clientes_seeder = SheetSeeder(
     sheet_key="13hY8la9Xke5-wu3vmdB-tNKtY5D6ud4FZrJG2_HtKd8",
     creds_dict=creds_dict,
     worksheet_name="aseguradosatlantida",
@@ -52,7 +52,17 @@ seeder = SheetSeeder(
     name_col="NOMBRE COMPLETO",
     role_default="cliente",
 )
+admins_seeder = SheetSeeder(
+    sheet_key="13hY8la9Xke5-wu3vmdB-tNKtY5D6ud4FZrJG2_HtKd8",
+    creds_dict=dict(creds_dict),
+    worksheet_name="admins",
+    email_col="CORREO ELECTRÓNICO",
+    cedula_col="NÚMERO IDENTIFICACIÓN",  # o la que tengas
+    name_col="NOMBRE COMPLETO",
+    role_default="admin",
+)
 
+seeder = CombinedSeeder(clientes_seeder, admins_seeder)
 # ========= 4) Store S3 (fuente de verdad) =========
 s3_store = S3UserStore(
     bucket=BUCKET,
