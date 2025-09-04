@@ -44,7 +44,18 @@ class BaseUserStore:
     def update_user(self, username: str, **fields) -> None:
         raise NotImplementedError
 
+class CombinedSeeder:
+    """Prueba varios seeders y devuelve el primero que encuentre al usuario."""
+    def __init__(self, *seeders):
+        self.seeders = [s for s in seeders if s]
 
+    def find_user(self, email: str):
+        for s in self.seeders:
+            u = s.find_user(email)
+            if u:
+                return u
+        return None
+        
 # ---------- Backend 1: Google Sheets ----------
 class SheetUserStore(BaseUserStore):
     """
@@ -372,7 +383,17 @@ class AuthManager:
 import json
 import boto3
 from botocore.exceptions import ClientError
+class CombinedSeeder:
+    """Prueba varios seeders y devuelve el primero que encuentre al usuario."""
+    def __init__(self, *seeders):
+        self.seeders = [s for s in seeders if s]
 
+    def find_user(self, email: str):
+        for s in self.seeders:
+            u = s.find_user(email)
+            if u:
+                return u
+        return None
 # ---------- Seeder desde Google Sheets (para poblar S3 si falta) ----------
 class SheetSeeder:
     """
