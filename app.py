@@ -1,7 +1,7 @@
 # app.py
 import json
 import streamlit as st
-from auth_mfa import AuthManager, S3UserStore, SheetSeeder
+from auth_mfa import AuthManager, S3UserStore, CombinedSeeder ,SheetSeeder
 import boto3, botocore
 from botocore.exceptions import ClientError
 
